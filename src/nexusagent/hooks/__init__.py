@@ -1,0 +1,1 @@
+"""Hooks system package."""

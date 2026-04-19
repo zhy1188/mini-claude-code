@@ -1,0 +1,16 @@
+{
+  "id": "20260418_165543",
+  "created_at": "2026-04-18T16:55:43.375987",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Test with hooks",
+      "token_count": 3
+    },
+    {
+      "role": "assistant",
+      "content": "done",
+      "token_count": 1
+    }
+  ]
+}

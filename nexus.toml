@@ -1,0 +1,29 @@
+[llm]
+provider = "openai"
+model = "qwen3.6-plus"
+api_key = "sk-ab4ddd0d308c4e9fa0f4bb9a7d4f08df"
+max_tokens = 8192
+temperature = 0.7
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+[context]
+max_tokens = 200000
+compact_threshold = 0.75
+compact_strategy = "llm_summary"
+
+[permissions]
+Read = "approve"
+Glob = "approve"
+Grep = "approve"
+Write = "ask"
+Bash = "ask"
+Task = "ask"
+
+[bash]
+timeout = 120
+max_output_bytes = 50000
+dangerous_patterns = ["rm -rf /", "sudo", ":(){:|:&};:"]
+
+[mcp]
+# MCP servers: name = "command to launch"
+# web_search = "npx -y @anthropic/mcp-server-web-search"
