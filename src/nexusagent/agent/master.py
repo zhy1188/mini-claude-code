@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 from nexusagent.agent.checkpoint import Checkpoint
@@ -65,6 +66,7 @@ class MasterAgent:
         workdir: Path | None = None,
         hook_engine: HookEngine | None = None,
         max_iterations: int = 50,
+        max_duration_minutes: float = 0,
         context_retriever: ContextRetriever | None = None,
         skill_registry: SkillRegistry | None = None,
     ):
@@ -76,6 +78,7 @@ class MasterAgent:
         self.workdir = workdir or Path.cwd()
         self.hook_engine = hook_engine
         self.max_iterations = max_iterations
+        self.max_duration_minutes = max_duration_minutes
         self.context_retriever = context_retriever
         self.skill_registry = skill_registry
         self._skill_matcher = SkillMatcher(skill_registry) if skill_registry else None
@@ -105,7 +108,9 @@ class MasterAgent:
         self.registry.register(self.memory_write_tool)
 
         # 子智能体编排器，用于派生子 Agent
-        self.orchestrator = AgentOrchestrator(self.llm, self.registry)
+        self.orchestrator = AgentOrchestrator(
+            self.llm, self.registry, timeout_seconds=0
+        )
 
         # Wire TaskTool to orchestrator + registry
         self._wire_task_tool()
@@ -201,6 +206,9 @@ class MasterAgent:
         # 阶段 2: 用户输入后保存检查点
         self._save_checkpoint("user_input", user_input=user_input)
 
+        # 运行时长追踪
+        start_time = time.monotonic()
+
         iteration = 0
         while self.state_machine.current not in ("done", "error") and iteration < self.max_iterations:
             iteration += 1
@@ -208,6 +216,17 @@ class MasterAgent:
             # 循环边界检查取消
             if self._check_cancelled():
                 return
+
+            # 检查运行时长超时
+            if self.max_duration_minutes > 0:
+                elapsed = time.monotonic() - start_time
+                elapsed_min = elapsed / 60
+                if elapsed_min >= self.max_duration_minutes:
+                    await self.tui.show_status(
+                        f"Task timed out after {elapsed_min:.1f}m (limit: {self.max_duration_minutes}m)"
+                    )
+                    await self._graceful_stop(user_input, iteration)
+                    return
 
             # 检查是否需要压缩
             if self.context.needs_compaction():

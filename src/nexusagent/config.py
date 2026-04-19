@@ -46,6 +46,12 @@ class MemoryConfig(BaseModel):
     max_memories_per_type: int = 50
 
 
+class AgentConfig(BaseModel):
+    max_iterations: int = 50
+    max_duration_minutes: float = 0  # 0 = unlimited
+    sub_agent_timeout_seconds: int = 300  # 0 = unlimited
+
+
 class NexusConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -53,6 +59,7 @@ class NexusConfig(BaseModel):
     bash: BashConfig = Field(default_factory=BashConfig)
     mcp: dict[str, str] = Field(default_factory=dict)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
 
 
 def _resolve_env_vars(value: str) -> str:

@@ -24,6 +24,11 @@ timeout = 120
 max_output_bytes = 50000
 dangerous_patterns = ["rm -rf /", "sudo", ":(){:|:&};:"]
 
+[agent]
+max_iterations = 50
+max_duration_minutes = 30
+sub_agent_timeout_seconds = 300
+
 [mcp]
 # MCP servers: name = "command to launch"
 # web_search = "npx -y @anthropic/mcp-server-web-search"

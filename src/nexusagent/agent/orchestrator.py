@@ -81,9 +81,10 @@ class AgentOrchestrator:
         能力隔离（研究智能体不会意外修改文件）。
     """
 
-    def __init__(self, llm: LLMClient, registry: ToolRegistry):
+    def __init__(self, llm: LLMClient, registry: ToolRegistry, timeout_seconds: int = 0):
         self.llm = llm
         self.registry = registry
+        self.timeout_seconds = timeout_seconds  # 0 = unlimited
 
     async def spawn(self, tasks: list[SubTask]) -> list[AgentResult]:
         """并发派生并运行多个子智能体"""
@@ -107,18 +108,35 @@ class AgentOrchestrator:
                 llm=self.llm,
                 system_prompt=system_prompt,
             )
-            agents.append(agent)
+            agents.append((agent, task.description))
 
-        # 并发执行
-        results = await asyncio.gather(
-            *[agent.run() for agent in agents],
-            return_exceptions=True,
-        )
+        # 并发执行（带超时）
+        if self.timeout_seconds > 0:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[agent.run() for agent, _ in agents],
+                    return_exceptions=True,
+                ),
+                timeout=self.timeout_seconds,
+            )
+        else:
+            results = await asyncio.gather(
+                *[agent.run() for agent, _ in agents],
+                return_exceptions=True,
+            )
 
         # 处理异常
         processed = []
-        for r in results:
-            if isinstance(r, Exception):
+        for r, (agent, task_desc) in zip(results, agents):
+            if isinstance(r, asyncio.TimeoutError):
+                processed.append(
+                    AgentResult(
+                        task=task_desc,
+                        status="error",
+                        summary=f"Sub-agent timed out ({self.timeout_seconds}s)",
+                    )
+                )
+            elif isinstance(r, Exception):
                 processed.append(
                     AgentResult(
                         task="",

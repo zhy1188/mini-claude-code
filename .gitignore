@@ -7,3 +7,9 @@ __pycache__/
 *.pyc
 .idea/
 .pytest_cache/
+
+# 面试/简历/笔记等非代码文档
+*INTERVIEW*.md
+*RESUME*.md
+*NOTE*.md
+Prepare*.md

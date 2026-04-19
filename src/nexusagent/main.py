@@ -240,7 +240,12 @@ async def _run_async(workdir: Path, config, console: Console):
         workdir=workdir,
         context_retriever=context_retriever,
         skill_registry=skill_registry,
+        max_iterations=config.agent.max_iterations,
+        max_duration_minutes=config.agent.max_duration_minutes,
     )
+
+    # 设置子智能体超时
+    agent.orchestrator.timeout_seconds = config.agent.sub_agent_timeout_seconds
 
     # Start REPL with cleanup
     try:
