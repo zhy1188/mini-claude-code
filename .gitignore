@@ -1,0 +1,9 @@
+.nexus/
+docs/
+.nexus.md
+PROJECT_UNDERSTANDING.md
+nexus-agent-technical-design.md
+__pycache__/
+*.pyc
+.idea/
+.pytest_cache/
