@@ -360,6 +360,7 @@ class MasterAgent:
                         result_content = f"Permission denied for tool: {tc.name}"
                         await self.tui.show_tool_end(tc.name, "denied")
                         self.tool_tracker.fail(tc.id, "Permission denied")
+                        result = ToolResult(content=result_content, is_error=True)
                     else:
                         result = await self._execute_tool(tc)
                         result_content = result.content
