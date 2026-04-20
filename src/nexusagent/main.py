@@ -82,7 +82,7 @@ async def _run_async(workdir: Path, config, console: Console):
     # Load cross-session memory
     from nexusagent.memory.memory import MemorySystem
 
-    memory = MemorySystem(workdir / ".nexus" / "memory")
+    memory = MemorySystem(workdir / ".nexus" / "memory", max_entries_per_type=config.memory.max_memories_per_type)
     memory_content = memory.load_all()
     if memory_content:
         builder.update_section("memory", memory_content)
@@ -242,6 +242,7 @@ async def _run_async(workdir: Path, config, console: Console):
         skill_registry=skill_registry,
         max_iterations=config.agent.max_iterations,
         max_duration_minutes=config.agent.max_duration_minutes,
+        max_memories_per_type=config.memory.max_memories_per_type,
     )
 
     # 设置子智能体超时

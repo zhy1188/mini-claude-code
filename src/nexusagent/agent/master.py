@@ -69,6 +69,7 @@ class MasterAgent:
         max_duration_minutes: float = 0,
         context_retriever: ContextRetriever | None = None,
         skill_registry: SkillRegistry | None = None,
+        max_memories_per_type: int = 50,
     ):
         self.llm = llm_client
         self.registry = tool_registry
@@ -82,6 +83,7 @@ class MasterAgent:
         self.context_retriever = context_retriever
         self.skill_registry = skill_registry
         self._skill_matcher = SkillMatcher(skill_registry) if skill_registry else None
+        self.max_memories_per_type = max_memories_per_type
 
         # 第 1 层: 有限状态机（替代裸枚举）
         self.state_machine = StateMachine(current="idle")
@@ -95,6 +97,9 @@ class MasterAgent:
         self._cancel_event = asyncio.Event()
         self._current_user_input = ""
 
+        # 单槽缓冲：非 IDLE 时允许排队 1 条输入
+        self._pending_input: str | None = None
+
         # 第 4 层: 工具追踪
         self.tool_tracker = ToolTracker()
 
@@ -104,7 +109,7 @@ class MasterAgent:
 
         # Memory write tool
         nexus_dir = self.workdir / ".nexus"
-        self.memory_write_tool = MemoryWriteTool(nexus_dir)
+        self.memory_write_tool = MemoryWriteTool(nexus_dir, max_entries=max_memories_per_type)
         self.registry.register(self.memory_write_tool)
 
         # 子智能体编排器，用于派生子 Agent
@@ -149,6 +154,33 @@ class MasterAgent:
     def request_cancel(self) -> None:
         """优雅停止信号（TUI 在 Ctrl+C 或 /stop 时调用）"""
         self._cancel_event.set()
+
+    @property
+    def is_busy(self) -> bool:
+        """Agent 是否正在处理任务"""
+        return self.state_machine.current not in ("idle", "done")
+
+    def queue_input(self, text: str) -> str:
+        """
+        尝试将输入加入单槽缓冲区。
+
+        返回:
+            "accepted"  — 已入队，将在当前轮次完成后处理
+            "full"      — 缓冲区已满（已有 1 条排队）
+            "idle"      — Agent 空闲，应直接调用 run()
+        """
+        if not self.is_busy:
+            return "idle"
+        if self._pending_input is not None:
+            return "full"
+        self._pending_input = text
+        return "accepted"
+
+    def _drain_pending(self) -> str | None:
+        """取出排队的输入，清空缓冲区"""
+        text = self._pending_input
+        self._pending_input = None
+        return text
 
     def _check_cancelled(self) -> bool:
         """检查是否请求取消。如果是，保存检查点并返回 True。"""
@@ -408,6 +440,12 @@ class MasterAgent:
         # 成功完成后清除检查点
         self.checkpoint.clear()
 
+        # 处理排队的输入
+        pending = self._drain_pending()
+        if pending:
+            await self.tui.show_status(f"Processing queued input: {pending[:50]}...")
+            await self.run(pending)
+
     async def _graceful_stop(self, user_input: str, iteration: int) -> None:
         """取消时保存状态并转换到完成"""
         self.state_machine.force("done")
@@ -513,4 +551,5 @@ class MasterAgent:
         self.context.reset()
         self.tool_tracker.reset()
         self._cancel_event.clear()
+        self._pending_input = None
         self._current_session_id = self.session_manager.create_session_id()

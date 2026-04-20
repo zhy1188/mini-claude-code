@@ -55,12 +55,13 @@ class MemoryWriteTool(Tool):
         },
     }
 
-    def __init__(self, nexus_dir: Path):
+    def __init__(self, nexus_dir: Path, max_entries: int = 50):
         super().__init__(nexus_dir)
         self.nexus_dir = nexus_dir
         self.memory_dir = nexus_dir / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
-        self.index = MemoryIndex(nexus_dir)
+        self.index = MemoryIndex(nexus_dir, max_entries_per_type=max_entries)
+        self.max_entries = max_entries
 
     async def execute(
         self,

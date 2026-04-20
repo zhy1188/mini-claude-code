@@ -28,9 +28,10 @@ class MemoryIndex:
     VALID_TYPES = ["user", "feedback", "project", "reference"]
     _ENTRY_RE = re.compile(r"^-\s+\[([^\]]+)\]\(([^)]+)\)\s*(?:--\s+(.*))?$")
 
-    def __init__(self, nexus_dir: Path):
+    def __init__(self, nexus_dir: Path, max_entries_per_type: int = 50):
         self.nexus_dir = nexus_dir
         self.index_file = nexus_dir / "MEMORY.md"
+        self.max_entries_per_type = max_entries_per_type
         self.entries: list[MemoryEntry] = []
         self._load()
 
@@ -82,6 +83,7 @@ class MemoryIndex:
         """
         Add an entry. Returns True if added, False if duplicate updated.
         Duplicate = same name + memory_type.
+        Trims oldest entries of the same type if count exceeds max_entries_per_type.
         """
         existing = self._find_entry(entry.name, entry.memory_type)
         if existing:
@@ -89,7 +91,23 @@ class MemoryIndex:
             existing.description = entry.description
             return False
         self.entries.append(entry)
+        self._enforce_limit(entry.memory_type)
         return True
+
+    def _enforce_limit(self, memory_type: str) -> None:
+        """Remove oldest entries of the given type if count exceeds max_entries_per_type."""
+        type_entries = [e for e in self.entries if e.memory_type == memory_type]
+        excess = len(type_entries) - self.max_entries_per_type
+        if excess <= 0:
+            return
+        # Remove oldest entries (first in list = oldest)
+        removed = 0
+        for entry in list(self.entries):
+            if entry.memory_type == memory_type:
+                self.entries.remove(entry)
+                removed += 1
+                if removed >= excess:
+                    break
 
     def update_entry(self, name: str, memory_type: str, **updates) -> bool:
         """Update an existing entry. Returns True if found and updated."""

@@ -24,13 +24,14 @@ class MemorySystem:
 
     MEMORY_TYPES = ["user", "feedback", "project", "reference"]
 
-    def __init__(self, memory_dir: Path | None = None):
+    def __init__(self, memory_dir: Path | None = None, max_entries_per_type: int = 50):
         self.memory_dir = memory_dir or Path(".nexus") / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.nexus_dir = self.memory_dir.parent
 
         # 初始化索引（如果 MEMORY.md 存在则加载）
-        self.index = MemoryIndex(self.nexus_dir)
+        self.index = MemoryIndex(self.nexus_dir, max_entries_per_type=max_entries_per_type)
+        self.max_entries_per_type = max_entries_per_type
 
         # 如果默认记忆文件不存在则创建
         for name in self.MEMORY_TYPES:
