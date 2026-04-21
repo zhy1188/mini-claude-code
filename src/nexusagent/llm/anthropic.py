@@ -121,7 +121,7 @@ class AnthropicClient(LLMClient):
                     full_text = ""  # Tool call response, no text content
 
             yield LLMResponse(
-                content=full_text,
+                content="",
                 tool_calls=tool_calls,
                 stop_reason=final.stop_reason or "",
                 usage={

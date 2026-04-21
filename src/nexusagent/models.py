@@ -8,19 +8,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-# ─── Agent State ───────────────────────────────────────────────────────────
-
-class AgentState(Enum):
-    IDLE = "idle"
-    GATHERING = "gathering"
-    THINKING = "thinking"
-    ACTING = "acting"
-    VERIFYING = "verifying"
-    COMPACTING = "compacting"
-    DONE = "done"
-    ERROR = "error"
-
-
 # ─── Messages ──────────────────────────────────────────────────────────────
 
 class Message(BaseModel):

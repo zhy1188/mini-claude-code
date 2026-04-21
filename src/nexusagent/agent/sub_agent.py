@@ -90,7 +90,7 @@ class SubAgent:
                 task=self.task,
                 status="success",
                 summary=full_content,
-                artifacts=artifacts,
+                artifacts=artifacts,#修改的文件列表
                 tool_calls_made=self.tool_calls_made,
                 token_usage=self.token_usage,
             )

@@ -1,160 +1,114 @@
-"""MCP Bridge: connects to external MCP servers via stdio JSON-RPC."""
+"""MCP Bridge: connects to MCP servers via stdio or Streamable HTTP."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
-from nexusagent.tools.base import Tool
+from nexusagent.tools.mcp.transport import HTTPTransport, MCPTransport, StdioTransport
 from nexusagent.tools.mcp.wrapper import MCPWrappedTool
 from nexusagent.tools.registry import ToolRegistry
 
 
 class MCPBridge:
     """
-    实现 MCP（模型上下文协议）子集:
-    - 连接到本地 stdio MCP 服务器
-    - JSON-RPC 初始化握手
-    - tools/list: 发现工具定义
-    - tools/call: 执行远程工具
-    - 将发现的工具注册到 ToolRegistry
-
-    MCP 协议流程:
-        1. 派生子进程（stdio 通信）
-        2. JSON-RPC 初始化握手
-        3. tools/list: 获取工具定义
-        4. tools/call: 执行工具
+    管理多个 MCP 服务器连接（stdio 或 HTTP）。
+    统一处理初始化握手、工具发现和注册。
+    支持运行时热插拔：add_server / remove_server。
     """
-
-    _JSONRPC_TIMEOUT = 30  # JSON-RPC 请求超时（秒）
 
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
-        self._servers: dict[str, dict] = {}  # name -> {proc, info}
+        self._servers: dict[str, dict] = {}  # name -> {transport, info, ref_count}
 
-    async def connect_server(self, name: str, command: str) -> None:
+    def _on_active_change(self, server_name: str, delta: int) -> None:
+        """工具执行开始/结束时更新引用计数"""
+        server = self._servers.get(server_name)
+        if server:
+            server["ref_count"] = max(0, server["ref_count"] + delta)
+
+    async def connect_server(self, name: str, config: dict) -> None:
         """连接到 MCP 服务器并注册其工具"""
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except Exception as e:
-            print(f"MCP: Failed to start server '{name}': {e}")
+        await self.add_server(name, config)
+
+    async def add_server(self, name: str, config: dict) -> None:
+        """运行时动态接入新的 MCP 服务器"""
+        if name in self._servers:
+            print(f"MCP: Server '{name}' already connected, skipping")
             return
 
-        # 启动 stderr 后台读取任务，捕获服务器日志
-        asyncio.create_task(self._drain_stderr(proc, name))
+        transport_type = config.get("transport", "stdio")
 
-        # 初始化握手
+        if transport_type == "http":
+            transport: MCPTransport = HTTPTransport(url=config["url"])
+        else:
+            transport = StdioTransport(command=config["command"])
+
         try:
-            init_result = await self._jsonrpc_request(
-                proc,
-                "initialize",
-                {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "NexusAgent", "version": "0.1.0"},
-                },
-            )
+            init_result = await transport.connect()
         except Exception as e:
-            proc.kill()
-            print(f"MCP: Failed to initialize server '{name}': {e}")
+            await transport.disconnect()
+            print(f"MCP: Failed to connect to '{name}' ({transport_type}): {e}")
             return
 
         # 发送已初始化通知
-        await self._jsonrpc_notify(proc, "notifications/initialized", {})
+        await transport.send_notification("notifications/initialized", {})
 
         # 发现工具
         try:
-            tools_resp = await self._jsonrpc_request(proc, "tools/list", {})
+            tools_resp = await transport.send("tools/list", {})
             tools = tools_resp if isinstance(tools_resp, list) else tools_resp.get("tools", [])
 
             for tool_def in tools:
-                wrapped = MCPWrappedTool(proc, name, tool_def)
+                wrapped = MCPWrappedTool(
+                    transport, name, tool_def,
+                    on_active_change=self._on_active_change,
+                )
                 self.registry.register(wrapped)
 
-            self._servers[name] = {"proc": proc, "info": init_result}
-            print(f"MCP: Connected to '{name}', registered {len(tools)} tools")
+            self._servers[name] = {"transport": transport, "info": init_result, "ref_count": 0}
+            print(f"MCP: Connected to '{name}' ({transport_type}), registered {len(tools)} tools")
         except Exception as e:
-            proc.kill()
+            await transport.disconnect()
             print(f"MCP: Failed to list tools from '{name}': {e}")
 
-    async def _jsonrpc_request(self, proc, method: str, params: dict) -> dict:
-        """发送 JSON-RPC 请求并等待响应"""
-        request_id = id(object())
-        request = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params,
-        }
+    async def remove_server(self, name: str) -> tuple[bool, str]:
+        """运行时断开指定 MCP 服务器，返回 (成功, 消息)"""
+        server = self._servers.get(name)
+        if not server:
+            return False, f"Server '{name}' not found"
 
-        if proc.stdin is None:
-            raise RuntimeError("Process stdin is None")
+        # 并发安全：检查是否有工具正在执行中
+        if server["ref_count"] > 0:
+            return False, f"Server '{name}' has {server['ref_count']} tool(s) running, try again later"
 
-        data = json.dumps(request) + "\n"
-        proc.stdin.write(data.encode())
-        await proc.stdin.drain()
+        # 注销该服务器的所有工具
+        prefix = f"mcp__{name}__"
+        removed = self.registry.unregister_prefix(prefix)
 
-        # 循环读取直到收到匹配 request_id 的响应
-        # MCP 服务器可能在 stdout 输出日志行（非 JSON）或通知消息
-        if proc.stdout is None:
-            raise RuntimeError("Process stdout is None")
-
-        while True:
-            line = await asyncio.wait_for(
-                proc.stdout.readline(), timeout=self._JSONRPC_TIMEOUT
-            )
-            if not line:
-                raise RuntimeError("MCP server closed connection")
-            try:
-                response = json.loads(line.decode())
-                # 忽略通知或日志（没有 id 字段，或 id 不匹配）
-                if "id" in response and response["id"] != request_id:
-                    continue
-                if "error" in response:
-                    raise RuntimeError(f"MCP error: {response['error']}")
-                # 返回结果（可能是 dict 或列表）
-                return response.get("result", {})
-            except json.JSONDecodeError:
-                # 忽略非 JSON 行（如服务器日志输出）
-                continue
-
-    async def _jsonrpc_notify(self, proc, method: str, params: dict) -> None:
-        """发送 JSON-RPC 通知（不需要响应）"""
-        notification = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }
-        if proc.stdin is None:
-            return
-        data = json.dumps(notification) + "\n"
-        proc.stdin.write(data.encode())
-        await proc.stdin.drain()
-
-    async def _drain_stderr(self, proc, name: str) -> None:
-        """后台读取 stderr 并打印日志"""
+        # 断开连接
         try:
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                text = line.decode().strip()
-                if text:
-                    print(f"MCP[{name}] stderr: {text}")
-        except Exception:
-            pass
+            await server["transport"].disconnect()
+        except Exception as e:
+            del self._servers[name]
+            return False, f"Disconnect error: {e}"
+
+        del self._servers[name]
+        return True, f"Removed server '{name}', unregistered {len(removed)} tools: {', '.join(removed)}"
+
+    def list_servers(self) -> list[dict]:
+        """列出所有已连接的 MCP 服务器"""
+        result = []
+        for name, server in self._servers.items():
+            tools = [t.name for t in self.registry.get_all() if t.name.startswith(f"mcp__{name}__")]
+            result.append({
+                "name": name,
+                "tools": tools,
+                "tool_count": len(tools),
+                "running": server["ref_count"],
+            })
+        return result
 
     async def disconnect_all(self) -> None:
         """断开所有 MCP 服务器连接"""
-        for name, server in self._servers.items():
-            try:
-                server["proc"].kill()
-            except Exception:
-                pass
-        self._servers.clear()
+        for name in list(self._servers.keys()):
+            await self.remove_server(name)

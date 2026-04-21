@@ -1,6 +1,6 @@
 """Entry point: python -m nexusagent"""
 
-from nexusagent.main import main
+from nexusagent.Main import main
 
 if __name__ == "__main__":
     main()

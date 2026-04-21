@@ -15,6 +15,17 @@ class ToolRegistry:
         """注册一个工具"""
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> bool:
+        """注销单个工具，返回是否成功"""
+        return self._tools.pop(name, None) is not None
+
+    def unregister_prefix(self, prefix: str) -> list[str]:
+        """按名称前缀批量移除工具，返回被移除的名称列表"""
+        removed = [n for n in self._tools if n.startswith(prefix)]
+        for name in removed:
+            del self._tools[name]
+        return removed
+
     def get(self, name: str) -> Tool | None:
         """按名称获取工具"""
         return self._tools.get(name)
@@ -30,5 +41,5 @@ class ToolRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self._tools)

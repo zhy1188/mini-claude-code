@@ -95,8 +95,9 @@ class OpenAICompatibleClient(LLMClient):
                     ToolCall(id=tc_data["id"], name=name, input=args)
                 )
 
+        # Emit final response with metadata only (no content duplication)
         yield LLMResponse(
-            content=full_content,
+            content="",
             tool_calls=tool_calls,
             stop_reason=chunk.choices[0].finish_reason if chunk.choices else "",
             usage={

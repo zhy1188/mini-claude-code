@@ -12,6 +12,148 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
+from rich.console import Group as RichGroup
+
+
+class StatusBar:
+    """Single status bar that stays at the terminal bottom, updating in-place.
+
+    Uses one Rich Live instance throughout the entire agent run — thinking
+    content is rendered inside the same Live via a Rich Group.
+    """
+
+    PHASE_LABELS = {
+        "idle": "IDLE",
+        "gathering": "GATHERING",
+        "thinking": "THINKING",
+        "acting": "ACTING",
+        "verifying": "VERIFYING",
+        "compact": "COMPACTING",
+        "done": "DONE",
+        "error": "ERROR",
+    }
+
+    PHASE_COLORS = {
+        "idle": "dim",
+        "gathering": "blue",
+        "thinking": "yellow",
+        "acting": "magenta",
+        "verifying": "cyan",
+        "compact": "orange",
+        "done": "green",
+        "error": "red",
+    }
+
+    def __init__(self, console: Console, model: str = "", provider: str = "", max_tokens: int = 200_000):
+        self.console = console
+        self.model = model
+        self.provider = provider
+        self.max_tokens = max_tokens
+
+        self._phase = "idle"
+        self._token_used = 0
+        self._tool_name = ""
+        self._tool_duration = 0.0
+        self._extra = ""
+
+        self._thinking = False
+        self._thinking_buffer = ""
+
+        self._live: Live | None = None
+
+    def show(self) -> None:
+        """Start the Live display at terminal bottom."""
+        if self._phase == "idle" or self._live is not None:
+            return
+        self._live = Live(
+            self._build_content(),
+            console=self.console,
+            refresh_per_second=4,
+            transient=False,
+            vertical_overflow="visible",
+        )
+        self._live.start()
+
+    def hide(self) -> None:
+        """Stop the Live display."""
+        if self._live:
+            self._live.stop()
+            self._live = None
+
+    def update_phase(self, phase: str) -> None:
+        self._phase = phase
+        self._refresh()
+
+    def update_tokens(self, used: int) -> None:
+        self._token_used = used
+        self._refresh()
+
+    def update_tool(self, name: str = "", duration: float = 0.0) -> None:
+        self._tool_name = name
+        self._tool_duration = duration
+        self._refresh()
+
+    def set_extra(self, text: str) -> None:
+        self._extra = text
+        self._refresh()
+
+    def start_thinking(self) -> None:
+        self._thinking = True
+        self._thinking_buffer = ""
+        self._refresh()
+
+    def add_token(self, token: str) -> None:
+        self._thinking_buffer += token
+        self._refresh()
+
+    def stop_thinking(self) -> None:
+        self._thinking = False
+        self._thinking_buffer = ""
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if self._live:
+            self._live.update(self._build_content(), refresh=True)
+        elif self._phase not in ("idle",):
+            self.show()
+
+    def _build_content(self):
+        """Build content: thinking panel + status bar (or just status bar)."""
+        panel = self._build_panel()
+        if self._thinking and self._thinking_buffer:
+            return RichGroup(
+                Panel(Markdown(self._thinking_buffer), title="Thinking", border_style="yellow"),
+                panel,
+            )
+        return panel
+
+    def _build_panel(self) -> Panel:
+        parts: list[str] = []
+
+        color = self.PHASE_COLORS.get(self._phase, "white")
+        label = self.PHASE_LABELS.get(self._phase, self._phase.upper())
+        parts.append(f"[bold {color}]{label}[/bold {color}]")
+
+        if self.model:
+            parts.append(f"[dim]{self.model}[/dim]")
+
+        if self.max_tokens > 0:
+            used_k = self._token_used / 1000
+            max_k = self.max_tokens / 1000
+            pct = (self._token_used / self.max_tokens * 100) if self.max_tokens > 0 else 0
+            token_color = "red" if pct > 80 else "yellow" if pct > 60 else "green"
+            parts.append(f"[{token_color}]{used_k:.1f}K/{max_k:.0f}K ({pct:.0f}%)[/{token_color}]")
+
+        if self._tool_name:
+            dur = f"{self._tool_duration:.1f}s"
+            parts.append(f"[magenta]{self._tool_name} ({dur})[/magenta]")
+
+        if self._extra:
+            parts.append(f"[dim]{self._extra}[/dim]")
+
+        status_line = "  |  ".join(parts)
+        return Panel(Text.from_markup(status_line), border_style=color, padding=(0, 1))
 
 
 class NexusTUI:
@@ -24,6 +166,7 @@ class NexusTUI:
         self._session: PromptSession | None = None
         self._history_file = history_file or str(Path(".nexus") / "history")
         self._commands: dict[str, callable] = {}
+        self.status_bar: StatusBar | None = None
 
     def register_command(self, name: str, handler: callable, description: str = ""):
         """Register a slash command."""
@@ -76,8 +219,11 @@ class NexusTUI:
                     None, lambda: session.prompt("\n[bold green]> [/bold green]")
                 )
             except (EOFError, KeyboardInterrupt):
-                self.console.print("\n[dim]Goodbye![/dim]")
-                break
+                # Ctrl+C: 中断当前任务并清空队列
+                agent.request_cancel()
+                agent._pending_input = None
+                self.console.print("\n[dim]Interrupted. Queue cleared.[/dim]")
+                continue
 
             answer = answer.strip()
             if not answer:
@@ -90,6 +236,19 @@ class NexusTUI:
             if answer.startswith("/"):
                 await self._handle_command(answer, agent)
                 continue
+
+            # 单槽缓冲：如果 Agent 忙碌，尝试排队
+            if agent.is_busy:
+                result = agent.queue_input(answer)
+                if result == "accepted":
+                    self.console.print("[yellow]1 item queued, will process next.[/yellow]")
+                    continue
+                elif result == "full":
+                    self.console.print(
+                        "[red]Queue full (1 pending). Wait or press Ctrl+C to clear.[/red]"
+                    )
+                    continue
+                # result == "idle" → fall through to direct run()
 
             await agent.run(answer)
             self.console.print()
@@ -116,26 +275,34 @@ class NexusTUI:
         self.console.print(f"[dim]{text}[/dim]")
 
     async def start_thinking(self) -> None:
-        """Show thinking indicator."""
-        self._buffer = ""
-        self._live = Live(
-            Panel("[dim]Thinking...[/dim]", border_style="yellow"),
-            console=self.console,
-            refresh_per_second=4,
-        )
-        self._live.start()
+        """Delegate thinking display to status bar."""
+        if self.status_bar:
+            self.status_bar.start_thinking()
+        else:
+            # Fallback: no status bar, use legacy Live
+            self._buffer = ""
+            self._live = Live(
+                Panel("[dim]Thinking...[/dim]", border_style="yellow"),
+                console=self.console,
+                refresh_per_second=4,
+            )
+            self._live.start()
 
     async def show_token(self, token: str) -> None:
-        """Show a streamed token in the thinking panel."""
-        self._buffer += token
-        if self._live:
+        """Stream token to status bar or legacy Live."""
+        if self.status_bar:
+            self.status_bar.add_token(token)
+        elif self._live:
+            self._buffer += token
             self._live.update(
                 Panel(Markdown(self._buffer), title="Thinking", border_style="yellow")
             )
 
     async def stop_thinking(self) -> None:
-        """Stop the thinking indicator."""
-        if self._live:
+        """Stop thinking display."""
+        if self.status_bar:
+            self.status_bar.stop_thinking()
+        elif self._live:
             self._live.stop()
             self._live = None
             self.console.print()
@@ -155,3 +322,8 @@ class NexusTUI:
         icon = {"done": "done", "error": "failed", "denied": "denied"}.get(status, status)
         style = {"done": "green", "error": "red", "denied": "yellow"}.get(status, "dim")
         self.console.print(f"[{style}]{name}: {icon}[/{style}]")
+
+    async def show_queue_status(self, agent) -> None:
+        """Show pending queue indicator."""
+        if agent._pending_input is not None:
+            self.console.print("[bold yellow][1 queued][/bold yellow]")

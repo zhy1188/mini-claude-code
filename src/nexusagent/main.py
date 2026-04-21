@@ -58,8 +58,12 @@ async def _run_async(workdir: Path, config, console: Console):
 
     # ── Phase 2: MCP Bridge ────────────────────────────────────────
     mcp_bridge = MCPBridge(registry)
-    for server_name, command in config.mcp.items():
-        await mcp_bridge.connect_server(server_name, command)
+    for server_name, server_config in config.mcp.items():
+        if isinstance(server_config, str):
+            transport_config = {"transport": "stdio", "command": server_config}
+        else:
+            transport_config = server_config
+        await mcp_bridge.connect_server(server_name, transport_config)
 
     # Initialize context manager
     context_mgr = ContextManager(
@@ -107,15 +111,15 @@ async def _run_async(workdir: Path, config, console: Console):
             f"follow the skill's instructions:\n\n{skill_list}"
         ))
 
-    # Initialize permission system
-    trust_policy = TrustPolicy.from_config(config)
-    permission_gate = PermissionGate(trust_policy, console=console)
-
     # Initialize context retriever (Phase 4)
     context_retriever = ContextRetriever(workdir)
 
     # Initialize TUI
     tui = NexusTUI(console, history_file=str(workdir / ".nexus" / "history"))
+
+    # Initialize permission system
+    trust_policy = TrustPolicy.from_config(config)
+    permission_gate = PermissionGate(trust_policy, console=console)
 
     # Register slash commands
     async def cmd_config(args, agent):
@@ -205,6 +209,52 @@ async def _run_async(workdir: Path, config, console: Console):
     tui.register_command("forget", cmd_forget, "Forget a memory")
     tui.register_command("memstats", cmd_memstats, "Memory count by type")
     tui.register_command("hooks", cmd_hooks, "Show registered hooks")
+
+    # Register /mcp command for hot-plug MCP servers
+    async def cmd_mcp(args, agent):
+        """Manage MCP servers: /mcp list | add <name> <transport> <config> | remove <name>"""
+        parts = args.strip().split()
+        if not parts or parts[0] == "list":
+            servers = mcp_bridge.list_servers()
+            if not servers:
+                tui.console.print("[dim]No MCP servers connected[/dim]")
+                return
+            lines = []
+            for s in servers:
+                running = f" [yellow]({s['running']} running)[/yellow]" if s["running"] else ""
+                tools = ", ".join(s["tools"]) if s["tools"] else "(no tools)"
+                lines.append(f"  [bold]{s['name']}[/bold] — {s['tool_count']} tools{running}\n    {tools}")
+            tui.console.print(Panel("\n\n".join(lines), title="MCP Servers"))
+        elif parts[0] == "add":
+            if len(parts) < 4:
+                tui.console.print("[red]Usage: /mcp add <name> stdio <command> | /mcp add <name> http <url>[/red]")
+                return
+            name = parts[1]
+            transport_type = parts[2]
+            config_value = parts[3]
+            if transport_type == "stdio":
+                transport_config = {"transport": "stdio", "command": config_value}
+            elif transport_type == "http":
+                transport_config = {"transport": "http", "url": config_value}
+            else:
+                tui.console.print(f"[red]Unknown transport type: {transport_type}[/red]")
+                return
+            old_count = len(registry)
+            await mcp_bridge.add_server(name, transport_config)
+            new_tools = len(registry) - old_count
+            tui.console.print(f"[green]Added server '{name}', registered {new_tools} new tools[/green]")
+        elif parts[0] == "remove":
+            if len(parts) < 2:
+                tui.console.print("[red]Usage: /mcp remove <name>[/red]")
+                return
+            name = parts[1]
+            success, msg = await mcp_bridge.remove_server(name)
+            style = "green" if success else "red"
+            tui.console.print(f"[{style}]{msg}[/{style}]")
+        else:
+            tui.console.print("[red]Usage: /mcp list | add <name> <stdio|http> <config> | remove <name>[/red]")
+
+    tui.register_command("mcp", cmd_mcp, "Manage MCP servers (list/add/remove)")
 
     # Register /skills command to list all loaded skills
     async def cmd_skills(args, agent):

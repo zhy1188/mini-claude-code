@@ -9,7 +9,7 @@ from nexusagent.context.manager import ContextManager
 from nexusagent.hooks.engine import HookEngine
 from nexusagent.hooks.types import HookConfig, HookType
 from rich.console import Console
-from nexusagent.models import AgentState, UserMessage
+from nexusagent.models import UserMessage
 from nexusagent.permission.gate import PermissionGate
 from nexusagent.permission.policy import TrustPolicy
 from nexusagent.tools.builtin.bash import BashTool
@@ -84,7 +84,7 @@ async def test_agent_simple_response(setup_agent):
 
     await agent.run("What's in test.py?")
 
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
     assert len(llm.call_history) == 1
     assert llm.call_history[0]["messages"][0]["content"] == "What's in test.py?"
 
@@ -102,7 +102,7 @@ async def test_agent_tool_call(setup_agent):
 
     await agent.run("Read test.py")
 
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
     # Should have 2 LLM calls: initial + after tool result
     assert len(llm.call_history) == 2
 
@@ -119,7 +119,7 @@ async def test_agent_multiple_tools(setup_agent):
 
     await agent.run("Find all Python files")
 
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
     assert len(llm.call_history) == 2
 
 
@@ -214,7 +214,7 @@ async def test_multi_tool_chain(setup_agent):
 
     await agent.run("Find and read Python files")
 
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
     assert len(llm.call_history) == 3
 
 
@@ -251,7 +251,7 @@ async def test_context_compaction_full_flow(tmp_path):
         context_mgr.add_message(UserMessage(content="x" * 50))
 
     await agent.run("Continue after compaction")
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
 
 
 @pytest.mark.asyncio
@@ -270,7 +270,7 @@ async def test_permission_denied_blocks_flow(setup_agent):
 
     await agent.run("Write to out.txt")
 
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
 
 
 @pytest.mark.asyncio
@@ -298,7 +298,7 @@ async def test_input_queuing(setup_agent):
     )
 
     await agent.run("First message")
-    assert agent.state == AgentState.DONE
+    assert agent.state_machine.current == "done"
 
     # Now agent is idle, queue_input should return "idle"
     status = agent.queue_input("Second message")

@@ -15,7 +15,6 @@ from nexusagent.context.manager import ContextManager
 from nexusagent.context.retriever import ContextRetriever
 from nexusagent.llm.base import LLMClient
 from nexusagent.models import (
-    AgentState,
     AssistantMessage,
     ToolCall,
     ToolResult,
@@ -85,10 +84,8 @@ class MasterAgent:
         self._skill_matcher = SkillMatcher(skill_registry) if skill_registry else None
         self.max_memories_per_type = max_memories_per_type
 
-        # 第 1 层: 有限状态机（替代裸枚举）
+        # 第 1 层: 有限状态机
         self.state_machine = StateMachine(current="idle")
-        # 保留旧枚举以兼容旧代码
-        self.state = AgentState.IDLE
 
         # 第 2 层: 检查点系统
         self.checkpoint = Checkpoint(self.workdir / ".nexus" / "checkpoints")
@@ -125,22 +122,22 @@ class MasterAgent:
 
     def _register_state_callbacks(self) -> None:
         """Register TUI updates on state transitions."""
-        self.state_machine.on_transition("thinking", lambda old, new: None)  # handled inline
-        self.state_machine.on_transition("compact", lambda old, new: None)
+        self.state_machine.on_transition("thinking", self._on_state_change)
+        self.state_machine.on_transition("acting", self._on_state_change)
+        self.state_machine.on_transition("gathering", self._on_state_change)
+        self.state_machine.on_transition("verifying", self._on_state_change)
+        self.state_machine.on_transition("compact", self._on_state_change)
+        self.state_machine.on_transition("done", self._on_state_change)
+        self.state_machine.on_transition("error", self._on_state_change)
+        self.state_machine.on_transition("idle", self._on_state_change)
 
-    def _sync_legacy_state(self) -> None:
-        # 将 FSM 状态同步到旧版 AgentState 枚举（向后兼容）
-        state_map = {
-            "idle": AgentState.IDLE,
-            "gathering": AgentState.GATHERING,
-            "thinking": AgentState.THINKING,
-            "acting": AgentState.ACTING,
-            "verifying": AgentState.VERIFYING,
-            "compact": AgentState.COMPACTING,
-            "done": AgentState.DONE,
-            "error": AgentState.ERROR,
-        }
-        self.state = state_map.get(self.state_machine.current, AgentState.IDLE)
+    def _on_state_change(self, old: str, new: str) -> None:
+        """Handle state machine transitions: update status bar synchronously."""
+        if self.tui.status_bar:
+            self.tui.status_bar.update_phase(new)
+            self.tui.status_bar.update_tokens(self.context.total_token_count)
+            if new in ("idle", "done", "error"):
+                self.tui.status_bar.hide()
 
     def _wire_task_tool(self):
         """将 TaskTool 连接到编排器（创建后绑定）"""
@@ -201,7 +198,6 @@ class MasterAgent:
             self.state_machine.transition("gathering")
         except Exception:
             self.state_machine.force("gathering")
-        self._sync_legacy_state()
 
         # 触发用户消息前钩子
         if self.hook_engine:
@@ -211,7 +207,6 @@ class MasterAgent:
             if hook_result.blocked:
                 await self.tui.show_status(f"Hook blocked: {hook_result.reason}")
                 self.state_machine.transition("done")
-                self._sync_legacy_state()
                 return
 
         # 处理前检查取消
@@ -266,9 +261,13 @@ class MasterAgent:
                     self.state_machine.transition("compact")
                 except Exception:
                     self.state_machine.force("compact")
-                self._sync_legacy_state()
+
                 await self.tui.show_status("Compressing context...")
+                if self.tui.status_bar:
+                    self.tui.status_bar.set_extra("Compressing context...")
                 await self.context.compact(self.llm)
+                if self.tui.status_bar:
+                    self.tui.status_bar.set_extra("")
 
             # 构建 LLM 消息
             messages = self.context.build_messages()
@@ -285,7 +284,7 @@ class MasterAgent:
                 self.state_machine.transition("thinking")
             except Exception:
                 self.state_machine.force("thinking")
-            self._sync_legacy_state()
+
             await self.tui.start_thinking()
 
             full_content = ""
@@ -314,6 +313,8 @@ class MasterAgent:
             # 用 API 返回的实际 token 数校准计数器
             if last_response and last_response.usage:
                 self.context.calibrate_from_api_response(last_response.usage)
+                if self.tui.status_bar:
+                    self.tui.status_bar.update_tokens(self.context.total_token_count)
 
             # 处理工具调用
             if tool_calls:
@@ -321,7 +322,7 @@ class MasterAgent:
                     self.state_machine.transition("acting")
                 except Exception:
                     self.state_machine.force("acting")
-                self._sync_legacy_state()
+
                 if full_content:
                     self.context.add_message(AssistantMessage(content=full_content))
 
@@ -339,6 +340,8 @@ class MasterAgent:
 
                     await self.tui.show_tool_start(tc.name, tc.input)
                     self.tool_tracker.start(tc.id)
+                    if self.tui.status_bar:
+                        self.tui.status_bar.update_tool(tc.name)
 
                     # Trigger pre-tool-use hooks
                     if self.hook_engine:
@@ -361,6 +364,7 @@ class MasterAgent:
                         await self.tui.show_tool_end(tc.name, "denied")
                         self.tool_tracker.fail(tc.id, "Permission denied")
                         result = ToolResult(content=result_content, is_error=True)
+                        status = "denied"
                     else:
                         result = await self._execute_tool(tc)
                         result_content = result.content
@@ -372,17 +376,20 @@ class MasterAgent:
                         else:
                             self.tool_tracker.complete(tc.id, result_content)
 
+                    if self.tui.status_bar:
+                        self.tui.status_bar.update_tool()  # clear tool display
+
                     # 触发工具使用后钩子
-                        if self.hook_engine:
-                            await self.hook_engine.trigger(
-                                HookType.POST_TOOL_USE,
-                                {
-                                    "tool_name": tc.name,
-                                    "tool_input": json.dumps(tc.input),
-                                    "tool_output": result_content,
-                                    "status": status,
-                                },
-                            )
+                    if self.hook_engine:
+                        await self.hook_engine.trigger(
+                            HookType.POST_TOOL_USE,
+                            {
+                                "tool_name": tc.name,
+                                "tool_input": json.dumps(tc.input),
+                                "tool_output": result_content,
+                                "status": status,
+                            },
+                        )
 
                     # 将工具结果加入历史
                     tool_msg = ToolResultMessage(
@@ -404,7 +411,7 @@ class MasterAgent:
                     self.state_machine.transition("verifying")
                 except Exception:
                     self.state_machine.force("verifying")
-                self._sync_legacy_state()
+
                 self.context.add_message(AssistantMessage(content=full_content))
 
                 # 触发响应后钩子
@@ -418,7 +425,7 @@ class MasterAgent:
                     self.state_machine.transition("done")
                 except Exception:
                     self.state_machine.force("done")
-                self._sync_legacy_state()
+
                 break
 
         # 正常完成
@@ -426,13 +433,13 @@ class MasterAgent:
             self.state_machine.transition("done")
         except Exception:
             self.state_machine.force("done")
-        self._sync_legacy_state()
+
 
         # 触发用户消息后钩子
         if self.hook_engine:
             await self.hook_engine.trigger(
                 HookType.POST_USER_MESSAGE,
-                {"user_input": user_input, "state": self.state.value},
+                {"user_input": user_input, "state": self.state_machine.current},
             )
 
         # 自动保存会话
@@ -450,7 +457,7 @@ class MasterAgent:
     async def _graceful_stop(self, user_input: str, iteration: int) -> None:
         """取消时保存状态并转换到完成"""
         self.state_machine.force("done")
-        self._sync_legacy_state()
+
         self._save_session()
         # 保留检查点以便用户恢复
 
@@ -548,7 +555,7 @@ class MasterAgent:
     def reset(self):
         """重置 Agent 状态以开始新会话"""
         self.state_machine.reset()
-        self._sync_legacy_state()
+
         self.context.reset()
         self.tool_tracker.reset()
         self._cancel_event.clear()
